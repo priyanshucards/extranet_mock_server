@@ -548,6 +548,7 @@ for (const endpoint of Object.keys(RESPONSES)) {
 }
 let responseDelay = 300;
 const requestLog = [];
+const mockUploadsStore = new Map();
 
 // ── Request logger middleware (BEFORE routes) ───────────────────────
 const BASE = "/api/onboarding";
@@ -1216,6 +1217,20 @@ const MOCK_AMENITIES_MASTER = [
   },
 ];
 
+// ── Property Info — Photo Tags Master List ────────────────────────────
+const MOCK_PHOTO_TAGS = [
+  { id: "facade", label: "Facade" },
+  { id: "room", label: "Room" },
+  { id: "lobby", label: "Lobby" },
+  { id: "pool", label: "Pool" },
+  { id: "dining", label: "Dining" },
+  { id: "reception", label: "Reception" },
+  { id: "bathroom", label: "Bathroom" },
+  { id: "balcony", label: "Balcony" },
+  { id: "exterior", label: "Exterior" },
+  { id: "amenities", label: "Amenities" },
+];
+
 // ── Rooms — Enums & In-Memory Store ──────────────────────────────
 const ROOM_ENUMS = {
   room_size_units: ["ft", "m"],
@@ -1743,7 +1758,7 @@ function handleImagesUploadUrl(req, res) {
     return setTimeout(() => res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid or expired access token." } }), responseDelay);
   }
 
-  const { file_name, file_type, file_size_bytes } = req.body;
+  const { file_name, file_type, file_size_bytes, file_count } = req.body;
   const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
   const maxSize = 10485760;
 
@@ -1759,18 +1774,59 @@ function handleImagesUploadUrl(req, res) {
     }), responseDelay);
   }
 
-  const imageId = "img_tmp_" + Math.random().toString(36).slice(2, 8);
+  const requestedCount = Number(file_count) > 0 ? Number(file_count) : 1;
+  const safeCount = Math.min(requestedCount, 20);
   const extranetId = req.params.extranet_id;
+  const host = req.get("host");
+  const protocol = req.protocol || "http";
+  const upload_urls = [];
+
+  for (let i = 0; i < safeCount; i += 1) {
+    const imageId = "img_tmp_" + Math.random().toString(36).slice(2, 10);
+    const token = Math.random().toString(36).slice(2, 10);
+    upload_urls.push(`${protocol}://${host}/mock-uploads/${extranetId}/${imageId}?token=${token}`);
+  }
 
   setTimeout(() => res.status(200).json({
     success: true,
     data: {
-      upload_url: `https://s3.amazonaws.com/scapia-hotels/${extranetId}/${imageId}?X-Amz-Signature=mock_signature_${Date.now()}`,
-      image_id: imageId,
+      upload_urls,
+      upload_url: upload_urls[0],
       expires_at: new Date(Date.now() + 5 * 60000).toISOString(),
       max_file_size_bytes: maxSize,
     },
   }), responseDelay);
+}
+
+// ── Mock Upload Storage (PUT + GET) ───────────────────────────────────
+function handleMockUploadPut(req, res) {
+  const { extranet_id, image_id } = req.params;
+  const contentType = req.headers["content-type"] || "application/octet-stream";
+  const bodyBuffer = Buffer.isBuffer(req.body)
+    ? req.body
+    : Buffer.from(req.body || "");
+
+  mockUploadsStore.set(`${extranet_id}/${image_id}`, {
+    contentType,
+    bodyBuffer,
+    uploadedAt: Date.now(),
+  });
+
+  return res.status(200).send("");
+}
+
+function handleMockUploadGet(req, res) {
+  const { extranet_id, image_id } = req.params;
+  const key = `${extranet_id}/${image_id}`;
+  const uploaded = mockUploadsStore.get(key);
+
+  if (!uploaded) {
+    // Return a small inline SVG placeholder if upload was never performed.
+    const placeholder = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="100%" height="100%" fill="#e5e7eb"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#6b7280" font-family="Arial" font-size="20">Mock Uploaded Image</text></svg>`;
+    return res.status(200).type("image/svg+xml").send(placeholder);
+  }
+
+  return res.status(200).type(uploaded.contentType).send(uploaded.bodyBuffer);
 }
 
 // ── Property Info — Check Duplicate Image handler ────────────────────
@@ -1876,6 +1932,18 @@ function handleAmenitiesMaster(req, res) {
     success: true,
     data: { amenities: MOCK_AMENITIES_MASTER },
   }), responseDelay);
+}
+
+// ── Property Info — Photo Tags handler ─────────────────────────────────
+function handlePhotoTags(req, res) {
+  setTimeout(
+    () =>
+      res.status(200).json({
+        success: true,
+        data: { tags: MOCK_PHOTO_TAGS },
+      }),
+    responseDelay,
+  );
 }
 
 // ── Rooms — Add Room handler ─────────────────────────────────────
@@ -2136,12 +2204,18 @@ app.get(BASE, handlePropertyInfoPrefetchByName);
 app.get(BASE + "/:extranet_id", handlePropertyInfoPrefetch);
 app.patch(BASE + "/:onboarding_id/property-info/basic-info", handleBasicInfoSave);
 app.post(BASE + "/property-info/send-otp/:extranet_id", handlePropertyInfoSendOtp);
+app.post(BASE + "/property-info/send-otp", handlePropertyInfoSendOtp);
 app.post(BASE + "/property-info/contact/verify-otp/:extranet_id", handlePropertyInfoVerifyOtp);
+app.post(BASE + "/property-info/contact/verify-otp", handlePropertyInfoVerifyOtp);
 app.post(BASE + "/property-info/images/upload-url/:extranet_id", handleImagesUploadUrl);
 app.post(BASE + "/property-info/images/check-duplicate/:extranet_id", handleImagesCheckDuplicate);
 app.post(BASE + "/property-info/images/confirm/:extranet_id", handleImagesConfirm);
 app.patch(BASE + "/property-info/images/:extranet_id", handleImagesUpdate);
 app.get(BASE + "/property-info/amenities/master/:extranet_id", handleAmenitiesMaster);
+app.get(BASE + "/property-info/tags", handlePhotoTags);
+app.get(BASE + "/property-info/tags/:extranet_id", handlePhotoTags);
+app.put("/mock-uploads/:extranet_id/:image_id", express.raw({ type: "*/*", limit: "20mb" }), handleMockUploadPut);
+app.get("/mock-uploads/:extranet_id/:image_id", handleMockUploadGet);
 
 // ── Rooms Step Routes ─────────────────────────────────────────────
 app.post(BASE + "/add-rooms/:extranet_id", handleAddRoom);
