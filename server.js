@@ -458,6 +458,86 @@ const RESPONSES = {
     },
   },
 
+  // ── Rooms Step ─────────────────────────────────────────────────────
+
+  "rooms/add": {
+    success: {
+      status: 201,
+      body: { success: true, message: "Smart mode — creates room from request body." },
+    },
+    VALIDATION_ERROR: {
+      status: 422,
+      body: {
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Validation failed.",
+          details: { room_name: "Room name is required.", "occupancy.max_occupancy": "Max occupancy cannot be less than max adults." },
+        },
+      },
+    },
+    DUPLICATE_ROOM_NAME: {
+      status: 409,
+      body: { success: false, error: { code: "DUPLICATE_ROOM_NAME", message: "A room with this name already exists." } },
+    },
+  },
+
+  "rooms/detail": {
+    success: {
+      status: 200,
+      body: { success: true, message: "Smart mode — returns room detail." },
+    },
+    ROOM_NOT_FOUND: {
+      status: 404,
+      body: { success: false, error: { code: "ROOM_NOT_FOUND", message: "Room not found." } },
+    },
+  },
+
+  "rooms/update": {
+    success: {
+      status: 200,
+      body: { success: true, message: "Smart mode — updates room fields." },
+    },
+    VALIDATION_ERROR: {
+      status: 422,
+      body: { success: false, error: { code: "VALIDATION_ERROR", message: "Validation failed.", details: {} } },
+    },
+    ROOM_NOT_FOUND: {
+      status: 404,
+      body: { success: false, error: { code: "ROOM_NOT_FOUND", message: "Room not found." } },
+    },
+  },
+
+  "rooms/delete": {
+    success: {
+      status: 200,
+      body: { success: true, message: "Smart mode — deletes room." },
+    },
+    ROOM_NOT_FOUND: {
+      status: 404,
+      body: { success: false, error: { code: "ROOM_NOT_FOUND", message: "Room not found." } },
+    },
+    CANNOT_DELETE_LAST_ROOM: {
+      status: 400,
+      body: { success: false, error: { code: "CANNOT_DELETE_LAST_ROOM", message: "At least one room must exist." } },
+    },
+  },
+
+  "rooms/submit": {
+    success: {
+      status: 200,
+      body: { success: true, message: "Smart mode — submits rooms step." },
+    },
+    NO_ROOMS_ADDED: {
+      status: 400,
+      body: { success: false, error: { code: "NO_ROOMS_ADDED", message: "You must add at least one room before continuing." } },
+    },
+    UNVERIFIED_ROOMS_EXIST: {
+      status: 400,
+      body: { success: false, error: { code: "UNVERIFIED_ROOMS_EXIST", message: "All rooms must be verified before submitting." } },
+    },
+  },
+
 };
 
 // ── State ───────────────────────────────────────────────────────────
@@ -1136,6 +1216,59 @@ const MOCK_AMENITIES_MASTER = [
   },
 ];
 
+// ── Rooms — Enums & In-Memory Store ──────────────────────────────
+const ROOM_ENUMS = {
+  room_size_units: ["ft", "m"],
+  room_views: [
+    { id: "city_view", label: "City View" },
+    { id: "garden_view", label: "Garden View" },
+    { id: "hill_view", label: "Hill View" },
+    { id: "pool_view", label: "Pool View" },
+    { id: "sea_view", label: "Sea View" },
+    { id: "no_view", label: "No View" },
+    { id: "airport_view", label: "Airport View" },
+    { id: "beach_view", label: "Beach View" },
+    { id: "mountain_view", label: "Mountain View" },
+    { id: "lake_view", label: "Lake View" },
+    { id: "river_view", label: "River View" },
+    { id: "ocean_view", label: "Ocean View" },
+    { id: "park_view", label: "Park View" },
+  ],
+  bed_types: [
+    { id: "king_bed", label: "King Bed" },
+    { id: "queen_bed", label: "Queen Bed" },
+    { id: "twin_bed", label: "Twin Bed" },
+    { id: "single_bed", label: "Single Bed" },
+    { id: "bunk_bed", label: "Bunk Bed" },
+  ],
+};
+
+// In-memory rooms store keyed by extranetId
+const roomsStore = new Map();
+
+function getRooms(extranetId) {
+  if (!roomsStore.has(extranetId)) {
+    roomsStore.set(extranetId, []);
+  }
+  return roomsStore.get(extranetId);
+}
+
+function getRoomsSummary(extranetId) {
+  const rooms = getRooms(extranetId);
+  const verified = rooms.filter(r => r.verification_status === "verified").length;
+  return { total: rooms.length, verified, unverified: rooms.length - verified };
+}
+
+function resolveViewLabel(viewId) {
+  const view = ROOM_ENUMS.room_views.find(v => v.id === viewId);
+  return view ? view.label : viewId;
+}
+
+function resolveBedTypeLabel(typeId) {
+  const bed = ROOM_ENUMS.bed_types.find(b => b.id === typeId);
+  return bed ? bed.label : typeId;
+}
+
 // ── Auth helper ─────────────────────────────────────────────────────
 function requireAuth(req) {
   const auth = req.headers.authorization;
@@ -1395,6 +1528,12 @@ function handlePropertyInfoPrefetch(req, res) {
   const extranetId = req.params.extranet_id;
   const state = JSON.parse(JSON.stringify(MOCK_ONBOARDING_STATE));
   state["extranet-id"] = extranetId;
+
+  // Include rooms data so the rooms step can consume the same endpoint
+  state.extranet_id = extranetId;
+  state.rooms = getRooms(extranetId);
+  state.rooms_summary = getRoomsSummary(extranetId);
+  state.presentationInfo = { enums: ROOM_ENUMS };
 
   setTimeout(() => res.status(200).json({ success: true, data: state }), responseDelay);
 }
@@ -1739,6 +1878,245 @@ function handleAmenitiesMaster(req, res) {
   }), responseDelay);
 }
 
+// ── Rooms — Add Room handler ─────────────────────────────────────
+function handleAddRoom(req, res) {
+  const panelKey = activeResponses["rooms/add"];
+  const isSuccess = !panelKey || panelKey === "success";
+
+  if (!isSuccess) {
+    const forced = RESPONSES["rooms/add"]?.[panelKey];
+    if (forced) return setTimeout(() => res.status(forced.status).json(forced.body), responseDelay);
+  }
+
+  if (!requireAuth(req)) {
+    return setTimeout(() => res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid or expired access token." } }), responseDelay);
+  }
+
+  const extranetId = req.params.extranet_id;
+  const body = req.body;
+
+  // Validate required fields
+  if (!body.room_name || !body.room_name.trim()) {
+    return setTimeout(() => res.status(422).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "Validation failed.", details: { room_name: "Room name is required." } },
+    }), responseDelay);
+  }
+
+  // Check duplicate name
+  const rooms = getRooms(extranetId);
+  if (rooms.some(r => r.room_name.toLowerCase() === body.room_name.trim().toLowerCase())) {
+    return setTimeout(() => res.status(409).json({
+      success: false,
+      error: { code: "DUPLICATE_ROOM_NAME", message: "A room with this name already exists." },
+    }), responseDelay);
+  }
+
+  // Create room
+  const roomId = "rm_" + Math.random().toString(36).slice(2, 8);
+  const newRoom = {
+    room_id: roomId,
+    room_name: body.room_name.trim(),
+    room_size: body.room_size || { value: 0, unit: "ft" },
+    room_view: { id: body.room_view_id, label: resolveViewLabel(body.room_view_id) },
+    number_of_rooms: body.number_of_rooms || 1,
+    has_balcony: body.has_balcony || false,
+    smoking_allowed: body.smoking_allowed || false,
+    bathrooms: body.bathrooms || { count: 1, attached: true },
+    bed: {
+      type_id: body.bed?.type_id || "",
+      type_label: resolveBedTypeLabel(body.bed?.type_id || ""),
+      count: body.bed?.count || 1,
+    },
+    extra_bed_provided: body.extra_bed_provided || false,
+    occupancy: body.occupancy || { base_adults: 1, max_adults: 2, max_children: 1, max_occupancy: 3 },
+    images: body.images || [],
+    amenities: body.amenities || [],
+    amenities_count: body.amenities_count || 0,
+    verification_status: body.verification_status || "verified",
+    source: "manual",
+  };
+
+  rooms.push(newRoom);
+
+  setTimeout(() => res.status(201).json({
+    success: true,
+    data: {
+      room_id: newRoom.room_id,
+      room_name: newRoom.room_name,
+      room_size: newRoom.room_size,
+      room_view: newRoom.room_view,
+      number_of_rooms: newRoom.number_of_rooms,
+      has_balcony: newRoom.has_balcony,
+      smoking_allowed: newRoom.smoking_allowed,
+      bathrooms: newRoom.bathrooms,
+      bed: newRoom.bed,
+      extra_bed_provided: newRoom.extra_bed_provided,
+      occupancy: newRoom.occupancy,
+      images: newRoom.images,
+      amenities_count: newRoom.amenities_count,
+      source: newRoom.source,
+      verification_status: newRoom.verification_status,
+    },
+  }), responseDelay);
+}
+
+// ── Rooms — Get Room Detail handler ──────────────────────────────
+function handleGetRoomDetail(req, res) {
+  const panelKey = activeResponses["rooms/detail"];
+  const isSuccess = !panelKey || panelKey === "success";
+
+  if (!isSuccess) {
+    const forced = RESPONSES["rooms/detail"]?.[panelKey];
+    if (forced) return setTimeout(() => res.status(forced.status).json(forced.body), responseDelay);
+  }
+
+  if (!requireAuth(req)) {
+    return setTimeout(() => res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid or expired access token." } }), responseDelay);
+  }
+
+  const { room_id, extranet_id } = req.params;
+  const rooms = getRooms(extranet_id);
+  const room = rooms.find(r => r.room_id === room_id);
+
+  if (!room) {
+    return setTimeout(() => res.status(404).json({
+      success: false,
+      error: { code: "ROOM_NOT_FOUND", message: "Room not found." },
+    }), responseDelay);
+  }
+
+  setTimeout(() => res.status(200).json({ success: true, data: room }), responseDelay);
+}
+
+// ── Rooms — Update Room handler ──────────────────────────────────
+function handleUpdateRoom(req, res) {
+  const panelKey = activeResponses["rooms/update"];
+  const isSuccess = !panelKey || panelKey === "success";
+
+  if (!isSuccess) {
+    const forced = RESPONSES["rooms/update"]?.[panelKey];
+    if (forced) return setTimeout(() => res.status(forced.status).json(forced.body), responseDelay);
+  }
+
+  if (!requireAuth(req)) {
+    return setTimeout(() => res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid or expired access token." } }), responseDelay);
+  }
+
+  const { room_id, extranet_id } = req.params;
+  const rooms = getRooms(extranet_id);
+  const roomIndex = rooms.findIndex(r => r.room_id === room_id);
+
+  if (roomIndex === -1) {
+    return setTimeout(() => res.status(404).json({
+      success: false,
+      error: { code: "ROOM_NOT_FOUND", message: "Room not found." },
+    }), responseDelay);
+  }
+
+  const fields = req.body;
+  const updatedFields = [];
+
+  for (const [key, value] of Object.entries(fields)) {
+    if (key === "room_view_id") {
+      rooms[roomIndex].room_view = { id: value, label: resolveViewLabel(value) };
+      updatedFields.push("room_view");
+    } else if (key === "bed") {
+      rooms[roomIndex].bed = { type_id: value.type_id, type_label: resolveBedTypeLabel(value.type_id), count: value.count };
+      updatedFields.push("bed");
+    } else if (key in rooms[roomIndex]) {
+      rooms[roomIndex][key] = value;
+      updatedFields.push(key);
+    }
+  }
+
+  // Mark as needing reverification if edited
+  if (updatedFields.length > 0 && !fields.verification_status) {
+    rooms[roomIndex].verification_status = "needs_reverification";
+  }
+
+  setTimeout(() => res.status(200).json({
+    success: true,
+    data: { room_id, verification_status: rooms[roomIndex].verification_status, updated_fields: updatedFields },
+  }), responseDelay);
+}
+
+// ── Rooms — Delete Room handler ──────────────────────────────────
+function handleDeleteRoom(req, res) {
+  const panelKey = activeResponses["rooms/delete"];
+  const isSuccess = !panelKey || panelKey === "success";
+
+  if (!isSuccess) {
+    const forced = RESPONSES["rooms/delete"]?.[panelKey];
+    if (forced) return setTimeout(() => res.status(forced.status).json(forced.body), responseDelay);
+  }
+
+  if (!requireAuth(req)) {
+    return setTimeout(() => res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid or expired access token." } }), responseDelay);
+  }
+
+  const { room_id, extranet_id } = req.params;
+  const rooms = getRooms(extranet_id);
+  const roomIndex = rooms.findIndex(r => r.room_id === room_id);
+
+  if (roomIndex === -1) {
+    return setTimeout(() => res.status(404).json({
+      success: false,
+      error: { code: "ROOM_NOT_FOUND", message: "Room not found." },
+    }), responseDelay);
+  }
+
+  rooms.splice(roomIndex, 1);
+  const summary = getRoomsSummary(extranet_id);
+
+  setTimeout(() => res.status(200).json({
+    success: true,
+    data: { room_id, rooms_summary: summary, can_submit_step: summary.total > 0 && summary.unverified === 0 },
+  }), responseDelay);
+}
+
+// ── Rooms — Submit Step handler ──────────────────────────────────
+function handleSubmitRoomsStep(req, res) {
+  const panelKey = activeResponses["rooms/submit"];
+  const isSuccess = !panelKey || panelKey === "success";
+
+  if (!isSuccess) {
+    const forced = RESPONSES["rooms/submit"]?.[panelKey];
+    if (forced) return setTimeout(() => res.status(forced.status).json(forced.body), responseDelay);
+  }
+
+  if (!requireAuth(req)) {
+    return setTimeout(() => res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid or expired access token." } }), responseDelay);
+  }
+
+  const extranetId = req.params.extranet_id;
+  const rooms = getRooms(extranetId);
+
+  if (rooms.length === 0) {
+    return setTimeout(() => res.status(400).json({
+      success: false,
+      error: { code: "NO_ROOMS_ADDED", message: "You must add at least one room before continuing." },
+    }), responseDelay);
+  }
+
+  const unverified = rooms.filter(r => r.verification_status !== "verified");
+  if (unverified.length > 0) {
+    return setTimeout(() => res.status(400).json({
+      success: false,
+      error: {
+        code: "UNVERIFIED_ROOMS_EXIST",
+        message: "All rooms must be verified before submitting.",
+        details: { unverified_room_ids: unverified.map(r => r.room_id) },
+      },
+    }), responseDelay);
+  }
+
+  setTimeout(() => res.status(200).json({
+    success: true,
+    data: { onboarding_step: "pricing", completed_steps: ["property", "rooms"] },
+  }), responseDelay);
+}
+
 // ── Auth API Routes ─────────────────────────────────────────────────
 app.post(BASE + "/auth/register", handleRegister);
 app.post(BASE + "/auth/verify-otp", handleVerifyOtp);
@@ -1764,6 +2142,13 @@ app.post(BASE + "/property-info/images/check-duplicate/:extranet_id", handleImag
 app.post(BASE + "/property-info/images/confirm/:extranet_id", handleImagesConfirm);
 app.patch(BASE + "/property-info/images/:extranet_id", handleImagesUpdate);
 app.get(BASE + "/property-info/amenities/master/:extranet_id", handleAmenitiesMaster);
+
+// ── Rooms Step Routes ─────────────────────────────────────────────
+app.post(BASE + "/add-rooms/:extranet_id", handleAddRoom);
+app.post(BASE + "/rooms/submit/:extranet_id", handleSubmitRoomsStep);
+app.get(BASE + "/rooms/:room_id/:extranet_id", handleGetRoomDetail);
+app.patch(BASE + "/rooms/:room_id/:extranet_id", handleUpdateRoom);
+app.delete(BASE + "/rooms/:room_id/:extranet_id", handleDeleteRoom);
 
 // ── Control Panel API ───────────────────────────────────────────────
 app.get("/api/mock/config", (_req, res) => {
@@ -1934,7 +2319,8 @@ const CONTROL_PANEL_HTML = /*html*/`<!DOCTYPE html>
     { label: "Properties", eps: ["properties/hotel-search", "properties/preview"] },
     { label: "Property Info — Basic", eps: ["property-info/prefetch", "property-info/basic-info", "property-info/send-otp", "property-info/verify-otp"] },
     { label: "Property Info — Images", eps: ["property-info/images/upload-url", "property-info/images/check-duplicate", "property-info/images/confirm", "property-info/images/update"] },
-    { label: "Property Info — Amenities", eps: ["property-info/amenities/master"] }
+    { label: "Property Info — Amenities", eps: ["property-info/amenities/master"] },
+    { label: "Rooms", eps: ["rooms/add", "rooms/detail", "rooms/update", "rooms/delete", "rooms/submit"] }
   ];
 
   var config = null;
@@ -1954,7 +2340,8 @@ const CONTROL_PANEL_HTML = /*html*/`<!DOCTYPE html>
       INVALID_FILE_TYPE:422, FILE_TOO_LARGE:422, UPLOAD_LIMIT_REACHED:429,
       DUPLICATE_FOUND:200,
       UPLOAD_URL_EXPIRED:400, IMAGE_NOT_UPLOADED:400, IMAGE_ALREADY_CONFIRMED:409,
-      HERO_IMAGE_DELETED:400, MULTIPLE_HERO_FLAGS:400, DUPLICATE_ORDER_VALUES:400, IMAGE_NOT_FOUND:404
+      HERO_IMAGE_DELETED:400, MULTIPLE_HERO_FLAGS:400, DUPLICATE_ORDER_VALUES:400, IMAGE_NOT_FOUND:404,
+      DUPLICATE_ROOM_NAME:409, ROOM_NOT_FOUND:404, CANNOT_DELETE_LAST_ROOM:400, NO_ROOMS_ADDED:400, UNVERIFIED_ROOMS_EXIST:400
     };
     return m[opt] || 400;
   }
@@ -1993,8 +2380,9 @@ const CONTROL_PANEL_HTML = /*html*/`<!DOCTYPE html>
 
         parts.push('<div class="ep">');
         var meth = "POST";
-        if (ep === "properties/hotel-search" || ep === "properties/preview" || ep === "property-info/prefetch" || ep === "property-info/amenities/master") meth = "GET";
-        else if (ep === "property-info/basic-info" || ep === "property-info/images/update") meth = "PATCH";
+        if (ep === "properties/hotel-search" || ep === "properties/preview" || ep === "property-info/prefetch" || ep === "property-info/amenities/master" || ep === "rooms/detail") meth = "GET";
+        else if (ep === "property-info/basic-info" || ep === "property-info/images/update" || ep === "rooms/update") meth = "PATCH";
+        else if (ep === "rooms/delete") meth = "DELETE";
         parts.push('<span class="m">' + meth + '</span>');
         parts.push('<span class="p">/api/onboarding/' + escHtml(ep) + '</span>');
         parts.push('<span class="b ' + (st < 400 ? 'b-ok' : 'b-err') + '">' + st + '</span>');
